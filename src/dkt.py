@@ -1,30 +1,24 @@
 import os 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-#os.environ['CUDA_VISIBLE_DEVICES'] = '2, 3, 4, 5, 6, 7'
-os.environ['CUDA_VISIBLE_DEVICES'] = '1, 2, 3'
-print(os.environ['CUDA_VISIBLE_DEVICES'], 'Visible GPU Devices')
+os.environ['CUDA_VISIBLE_DEVICES'] = '2, 3'
+print('\nVisible GPU Devices:', os.environ['CUDA_VISIBLE_DEVICES'])
 
-import tensorflow as tf
 # limit gpu memory
-#from keras.backend.tensorflow_backend import set_session
-from tensorflow.python.keras.backend import set_session
-config = tf.compat.v1.ConfigProto()
-#config.gpu_options.per_process_gpu_memory_fraction = 0.8
-config.gpu_options.allow_growth = True
-set_session(tf.compat.v1.Session(config=config))
+import tensorflow as tf
+gpus = tf.config.experimental.list_physical_devices(device_type='GPU')
+for gpu in gpus:
+    tf.config.experimental.set_memory_growth(gpu, True)
 
-import time
-import math
-import pickle
+import time, math, pickle
 import numpy as np
 import pandas as pd
 
 from sklearn.metrics import roc_auc_score, precision_score, accuracy_score, confusion_matrix
 
 #from keras import backend as K
-from tensorflow.keras.layers import Input, Masking, Dense, LSTM, Dropout, TimeDistributed, concatenate, multiply
 from tensorflow.keras.models import Model, Sequential
 from tensorflow.keras.callbacks import ModelCheckpoint
+from tensorflow.keras.layers import Input, Masking, Dense, LSTM, Dropout, TimeDistributed, concatenate, multiply
 
 from pad import pad_sequences
 from one_hot import one_hot
@@ -35,6 +29,7 @@ class Dkt():
 		self.__num_skills = num_skills
 		self.__features = num_skills*2
 		self.__hidden_units = hidden_units
+		self.mask_value = -1.0
 
 		#ms = tf.distribute.MirroredStrategy(devices=['/gpu:0'])
 		ms = tf.distribute.MirroredStrategy()
@@ -43,37 +38,33 @@ class Dkt():
 		print('Batch Size:', self.__batch_size)
 
 		with ms.scope():
-			x_t = Input(batch_shape=(None, None, self.__features))
-			mask = Masking(-1.0)(x_t)
+			x_t = Input(batch_shape=(None, None, 2*num_skills))
+			mask = Masking(self.mask_value)(x_t)
 			# MirroredStrategy not support stateful=True
 			#lstm = LSTM(hidden_units, return_sequences=True, stateful=True)(mask)
 			lstm = LSTM(hidden_units, return_sequences=True)(mask)
 			dropout = Dropout(dropout_rate)(lstm)
 			y = TimeDistributed(Dense(num_skills, activation='sigmoid'))(dropout)
 
-			x_tt = Input(batch_shape=(None, None, num_skills))
-			mask_tt = Masking(-1.0)(x_tt)
+			q_tt = Input(batch_shape=(None, None, num_skills))
+			mask_tt = Masking(self.mask_value)(q_tt)
 
 			z = concatenate([y, mask_tt])
 			#z = multiply([y, mask_tt])
 
 			z = TimeDistributed(Dense(32, activation='sigmoid'))(z)
 			z = TimeDistributed(Dense(1, activation='sigmoid'))(z)
-			self.__model = Model(inputs=[x_t, x_tt], outputs=z)
+
+			self.__model = Model(inputs=[x_t, q_tt], outputs=z)
 			self.__model.compile(loss='binary_crossentropy', optimizer=optimizer, metrics=[tf.keras.metrics.AUC(name='auc')])
 		#self.__model.summary()
-		#self.load_weights()
-		#self.save_lstm_weights()
 	
 	
 	def train_and_test(self, seqs, epochs=2):
 		print('\nEpochs:', epochs)
-		def gen_seqs():
-			for seq in seqs:
-				yield seq
 
+		### 根据每个学生作答序列生成输入输出
 		def gen_data():
-			#for seq in gen_seqs():
 			for seq in seqs:
 				xs = []
 				qtts = []
@@ -110,15 +101,16 @@ class Dkt():
 			return (a, b, c)
 
 		dataset = tf.data.Dataset.from_generator(gen_data, output_types=(tf.int32, tf.int32, tf.float32))
+		# shape: (None, 2*188) (None, 188), (None, 1)
 		dataset = dataset.map(multi_hot)
+		# shape: (batch_size, None, 2*188) (batch_size, None, 188) (batch_size, None, 1)
 		dataset = dataset.padded_batch(self.__batch_size, padded_shapes=([None, None], [None, None], [None, None]),
-										padding_values=(-1.0, -1.0, -1.0), drop_remainder=True)
-		dataset = dataset.map(lambda x, y, z: (
-				(x, y),
-				z
-		))
+										padding_values=(self.mask_value, self.mask_value, self.mask_value,),
+										drop_remainder=True)
+		# 把两个输入拼在一起
+		dataset = dataset.map(lambda x, y, z: ((x, y), z))
 		
-		### 按batch分训练，验证，测试集
+		### padded_batch之后，样本数量变len(seqs)/batch_size, 然后按batch size划分训练，验证，测试集
 		train_size = int(len(seqs) / self.__batch_size * 0.8) 
 		val_size = int(train_size * 0.8)
 		temp = dataset.take(train_size)
@@ -126,8 +118,10 @@ class Dkt():
 		val = temp.skip(val_size)
 		test = dataset.skip(train_size)
 
-		mc = ModelCheckpoint('../data/model/model_weights.h5', monitor='auc', save_weights_only=True, save_best_only=True)
-		history = self.__model.fit(train, validation_data=train, epochs=epochs, batch_size=self.__batch_size, callbacks=[mc], verbose=2)
+		mc = ModelCheckpoint('../data/model/model_weights.h5',
+				monitor='auc', save_weights_only=True, save_best_only=True)
+		history = self.__model.fit(train, validation_data=train,
+					epochs=epochs, batch_size=self.__batch_size, callbacks=[mc], verbose=2)
 
 		with open('../data/model/history.bf', mode='wb') as f:
 			pickle.dump(history.history, f)
@@ -363,7 +357,7 @@ class Dkt():
 		return max_length*self.__batch_size, x, x_tt, y 
 
 
-	def save_lstm_weights(self, path='../data/model/dkt_lrp.weights'):
+	def save_lrp_weights(self, path='../data/model/dkt_lrp.weights'):
 		h = self.__hidden_units
 
 		lstm_weights = self.__model.layers[2].get_weights()
