@@ -1,9 +1,10 @@
 import os 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-os.environ['CUDA_VISIBLE_DEVICES'] = '4, 5, 6, 7'
+#os.environ['CUDA_VISIBLE_DEVICES'] = '2, 3, 4, 5, 6, 7'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1, 2, 3'
+print(os.environ['CUDA_VISIBLE_DEVICES'], 'Visible GPU Devices')
 
 import tensorflow as tf
-
 # limit gpu memory
 #from keras.backend.tensorflow_backend import set_session
 from tensorflow.python.keras.backend import set_session
@@ -11,7 +12,6 @@ config = tf.compat.v1.ConfigProto()
 #config.gpu_options.per_process_gpu_memory_fraction = 0.8
 config.gpu_options.allow_growth = True
 set_session(tf.compat.v1.Session(config=config))
-
 
 import time
 import math
@@ -21,51 +21,28 @@ import pandas as pd
 
 from sklearn.metrics import roc_auc_score, precision_score, accuracy_score, confusion_matrix
 
-from keras import backend as K
-from keras.models import Model, Sequential
-from keras.layers import Masking, Dense, TimeDistributed, Dropout, Input, concatenate, multiply
-from keras.layers.recurrent import LSTM
-from keras.utils import multi_gpu_model
+#from keras import backend as K
+from tensorflow.keras.layers import Input, Masking, Dense, LSTM, Dropout, TimeDistributed, concatenate, multiply
+from tensorflow.keras.models import Model, Sequential
+from tensorflow.keras.callbacks import ModelCheckpoint
 
 from pad import pad_sequences
 from one_hot import one_hot
 
 
 class Dkt():
-	def __init__(self, num_skills, batch_size=100, time_steps=50, hidden_units=50, optimizer='rmsprop', dropout_rate=0.5):
+	def __init__(self, num_skills, batch_size=20, hidden_units=50, optimizer='rmsprop', dropout_rate=0.5):
 		self.__num_skills = num_skills
-		self.__batch_size = batch_size
-		self.__time_steps = time_steps
 		self.__features = num_skills*2
 		self.__hidden_units = hidden_units
-		
-		### origin dkt
-		#def loss(y_true, y_pred):
-		#	labels = y_true[:,:,num_skills]
-		#	skills = y_true[:,:,0:num_skills]
-		#	pred_labels = K.sum(y_pred * skills, axis=2)
-		#	return K.binary_crossentropy(labels, pred_labels)
 
-		### one question multi concepts dkt
-		def loss(y_true, y_pred):
-			labels = y_true[:,:,num_skills]
-			y_pred = tf.reshape(y_pred, (batch_size, -1))
-			return K.binary_crossentropy(tf.cast(labels, tf.float32), y_pred)
+		#ms = tf.distribute.MirroredStrategy(devices=['/gpu:0'])
+		ms = tf.distribute.MirroredStrategy()
+		print('\nUsed GPU Devices:', ms.num_replicas_in_sync)
+		self.__batch_size = batch_size * ms.num_replicas_in_sync
+		print('Batch Size:', self.__batch_size)
 
-		### sequential model
-		#self.__model = Sequential()
-		#self.__model.add(Masking(-1.0, batch_input_shape=(batch_size, None, self.__features)))
-		#self.__model.add(LSTM(hidden_units, return_sequences=True, stateful=True))
-		#self.__model.add(Dropout(dropout_rate))
-		#self.__model.add(TimeDistributed(Dense(num_skills, activation='sigmoid')))
-		#self.__model.add(TimeDistributed(Dense(32, activation='sigmoid')))
-		#self.__model.add(TimeDistributed(Dense(1, activation='sigmoid')))
-		#self.__model.summary()
-		#self.__model.compile(loss=loss, optimizer=optimizer)
-
-		### functional model
-		self.ms = tf.distribute.MirroredStrategy()
-		with self.ms.scope():
+		with ms.scope():
 			x_t = Input(batch_shape=(None, None, self.__features))
 			mask = Masking(-1.0)(x_t)
 			# MirroredStrategy not support stateful=True
@@ -76,82 +53,55 @@ class Dkt():
 
 			x_tt = Input(batch_shape=(None, None, num_skills))
 			mask_tt = Masking(-1.0)(x_tt)
+
 			z = concatenate([y, mask_tt])
 			#z = multiply([y, mask_tt])
+
 			z = TimeDistributed(Dense(32, activation='sigmoid'))(z)
 			z = TimeDistributed(Dense(1, activation='sigmoid'))(z)
 			self.__model = Model(inputs=[x_t, x_tt], outputs=z)
-			#self.__model = Model(inputs=x_t, outputs=z)
-			#self.__model.compile(loss=loss, optimizer=optimizer)
-			self.__model.compile(loss='binary_crossentropy', optimizer=optimizer)
+			self.__model.compile(loss='binary_crossentropy', optimizer=optimizer, metrics=[tf.keras.metrics.AUC(name='auc')])
 		#self.__model.summary()
-
-	def train_and_test(self, path):
-		df = pd.read_csv(path)
-		seqs = df.groupby('stu_docu_id').apply(
-			lambda r: (
-				r['correctness'].values,
-				r['correctness'].values,
-				r['correctness'].values
-			)
-		)
-
-		print(type(seqs))
-		print(seqs.keys())
-		print(type(seqs.get('u103390.csv')))
-		print(type(seqs.get('u103390.csv')))
-		print(seqs.get('u103390.csv'))
-
-		dataset = tf.data.Dataset.from_generator(lambda: seqs, output_types=(tf.int32, tf.int32, tf.float32))
-		dataset = dataset.map(lambda x, y, z: (
-				tf.one_hot(x, depth=188*2),
-				#tf.one_hot(y, depth=188),
-				tf.expand_dims(z, -1)
-				#z
-		))
-		dataset = dataset.padded_batch(1000, padded_shapes=([None, None], [None, None]),
-										padding_values=(-1.0, -1.0), drop_remainder=True)
-		self.__model.fit(dataset, epochs=1200, batch_size=1000)
-
+		#self.load_weights()
+		#self.save_lstm_weights()
 	
-	def ttrain_and_test(self, train_seqs, test_seqs, epochs=1):
-		seqs = []
-		for seq in train_seqs:
-			xs = []
-			qtts = []
-			ys = []
-			for item in seq:
-				skills = item[0]
-				answer = item[1]
+	
+	def train_and_test(self, seqs, epochs=2):
+		print('\nEpochs:', epochs)
+		def gen_seqs():
+			for seq in seqs:
+				yield seq
 
-				x = np.array([-1]*10)
-				for i,v in enumerate(skills):
-					x[i] = answer*self.__num_skills+v
-				qtt = np.array([-1]*10)
-				for i,v in enumerate(skills):
-					qtt[i] = v
-				#x = [item[1]*self.__num_skills+x for x in item[0]]
-				#qtt = item[0]
-				y = answer
+		def gen_data():
+			#for seq in gen_seqs():
+			for seq in seqs:
+				xs = []
+				qtts = []
+				ys = []
+				for item in seq:
+					skills = item[0]
+					answer = item[1]
 
-				#x = item[1]*self.__num_skills+item[0][0]
-				#qtt = item[0][0]
-				#y = item[1]
+					'''
+						每个题目对应多个知识点，设置10维数组存放题目ID，
+						因为转成tensor需要固定长度（接下来优化）
+					'''
+					x = np.array([-1]*8)
+					for i,v in enumerate(skills):
+						x[i] = answer*self.__num_skills+v
+					qtt = np.array([-1]*8)
+					for i,v in enumerate(skills):
+						qtt[i] = v
+					y = answer
 
-				xs.append(x)
-				qtts.append(qtt)
-				ys.append(y)
-			seqs.append((xs, qtts, ys))
+					xs.append(x)
+					qtts.append(qtt)
+					ys.append(y)
+				if len(xs) > 1: # answer more than one questions
+					yield ((xs[:-1], qtts[1:], ys[1:]))
 
-		def g():
-			for i in seqs:
-				yield i
-		gg = g()
-		print(type(next(gg)))
-		print(type(next(gg)[0]))
-		print(type(next(gg)[0][0]))
-
-		def mmm(x, y, z):
+		# multi hot question skills
+		def multi_hot(x, y, z):
 			a = tf.one_hot(x, depth=2*self.__num_skills)
 			a = tf.reduce_sum(a, 1)
 			b = tf.one_hot(y, depth=self.__num_skills)
@@ -159,31 +109,37 @@ class Dkt():
 			c = tf.expand_dims(z, -1)
 			return (a, b, c)
 
-		dataset = tf.data.Dataset.from_generator(lambda: seqs, output_types=(tf.int32, tf.int32, tf.float32))
-		#dataset = tf.data.Dataset.from_generator(lambda: seqs, output_types=(tf.int32, tf.int32, tf.float32),
-		#			output_shapes=([None, None], [None, None], [None]))
-
-		#dataset = dataset.map(lambda x, y, z: (
-		#		tf.one_hot(x, depth=2*self.__num_skills),
-		#		tf.one_hot(y, depth=self.__num_skills),
-		#		#tf.one_hot(x, depth=2*self.__num_skills),
-		#		#tf.one_hot(y, depth=self.__num_skills),
-		#		tf.expand_dims(z, -1)
-		#))
-		dataset = dataset.map(mmm)
-
-		#dataset = dataset.padded_batch(self.__batch_size, padded_shapes=([None, None], [None, None]),
-		#								padding_values=(-1.0, -1.0), drop_remainder=True)
+		dataset = tf.data.Dataset.from_generator(gen_data, output_types=(tf.int32, tf.int32, tf.float32))
+		dataset = dataset.map(multi_hot)
 		dataset = dataset.padded_batch(self.__batch_size, padded_shapes=([None, None], [None, None], [None, None]),
 										padding_values=(-1.0, -1.0, -1.0), drop_remainder=True)
-
-		# multi inputs (x, y), one output z
 		dataset = dataset.map(lambda x, y, z: (
 				(x, y),
 				z
 		))
+		
+		### 按batch分训练，验证，测试集
+		train_size = int(len(seqs) / self.__batch_size * 0.8) 
+		val_size = int(train_size * 0.8)
+		temp = dataset.take(train_size)
+		train = temp.take(val_size)
+		val = temp.skip(val_size)
+		test = dataset.skip(train_size)
 
-		self.__model.fit(dataset, epochs=100, batch_size=self.__batch_size)
+		mc = ModelCheckpoint('../data/model/model_weights.h5', monitor='auc', save_weights_only=True, save_best_only=True)
+		history = self.__model.fit(train, validation_data=train, epochs=epochs, batch_size=self.__batch_size, callbacks=[mc], verbose=2)
+
+		with open('../data/model/history.bf', mode='wb') as f:
+			pickle.dump(history.history, f)
+		print('loss:', history.history['loss'][-1])
+		print('auc:', history.history['auc'][-1])
+		print('val_loss:', history.history['val_loss'][-1])
+		print('val_auc:', history.history['val_auc'][-1])
+
+		result = self.__model.evaluate(test)
+		with open('../data/model/test_loss_auc.bf', mode='wb') as f:
+			pickle.dump(result, f)
+		print('Test loss and auc:', result)
 
 	
 #	def train_and_test(self, train_seqs, test_seqs, epochs=1):
@@ -216,21 +172,21 @@ class Dkt():
 #		print('\nMax Auc: ', max_auc)
 
 
-	def train(self, sequences):
-		loss = 0.0 
-		answers = 0
+	#def train(self, sequences):
+	#	loss = 0.0 
+	#	answers = 0
 
-		for start in range(0, len(sequences), self.__batch_size):
-			print('\rNow:', int(start/self.__batch_size), 'All:', int(len(sequences)/self.__batch_size), end='', flush=True)
-			answer, features, xtt, labels,  = self.__get_next_batch(sequences, start)
-			answers += answer
-			batch_loss = self.__model.train_on_batch([features, xtt], labels)
-			self.__model.reset_states()
+	#	for start in range(0, len(sequences), self.__batch_size):
+	#		print('\rNow:', int(start/self.__batch_size), 'All:', int(len(sequences)/self.__batch_size), end='', flush=True)
+	#		answer, features, xtt, labels,  = self.__get_next_batch(sequences, start)
+	#		answers += answer
+	#		batch_loss = self.__model.train_on_batch([features, xtt], labels)
+	#		self.__model.reset_states()
 
-			loss += batch_loss
+	#		loss += batch_loss
 
-		print('Loss: ', loss)
-		print('Real Train Answers: ', answers)
+	#	print('Loss: ', loss)
+	#	print('Real Train Answers: ', answers)
 
 
 	def get_correct_predict_seqs(self, sequences, threshold=0.5):
@@ -410,7 +366,7 @@ class Dkt():
 	def save_lstm_weights(self, path='../data/model/dkt_lrp.weights'):
 		h = self.__hidden_units
 
-		lstm_weights = self.model.layers[2].get_weights()
+		lstm_weights = self.__model.layers[2].get_weights()
 		
 		# lstm weights order: i, f, c, o
 		# lrp lstm weights order: i, c, f, o
@@ -430,14 +386,14 @@ class Dkt():
 		b_xh_h[h:2*h] = b_xh_h[2*h:3*h]
 		b_xh_h[2*h:3*h] = temp
 
-		dense_weights = self.model.layers[5].get_weights()
+		dense_weights = self.__model.layers[5].get_weights()
 		w_hy = dense_weights[0].T
 		b_hy = dense_weights[1]
 
-		f = self.model.layers[8].get_weights()
+		f = self.__model.layers[8].get_weights()
 		f_w = f[0].T
 		f_b = f[1]
-		z = self.model.layers[9].get_weights()
+		z = self.__model.layers[9].get_weights()
 		z_w = z[0].T
 		z_b = z[1]
 
@@ -486,7 +442,7 @@ class Dkt():
 		self.__model.save_weights(path, overwrite=True)
 
 
-	def load_weights(self, path='../data/model/dkt.h5'):
+	def load_weights(self, path='../data/model/model_weights.h5'):
 		self.__model.load_weights(path)
 
 
