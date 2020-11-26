@@ -1,19 +1,19 @@
 import os 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-os.environ['CUDA_VISIBLE_DEVICES'] = '2, 3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '2, 3, 4, 5, 6, 7'
 print('\nVisible GPU Devices:', os.environ['CUDA_VISIBLE_DEVICES'])
 
 # limit gpu memory
 import tensorflow as tf
+# 只能看到os.environ['CUDA_VISIBLE_DEVICES']设置的gpu
 gpus = tf.config.experimental.list_physical_devices(device_type='GPU')
 for gpu in gpus:
     tf.config.experimental.set_memory_growth(gpu, True)
 
-import time, math, pickle
+import time, pickle, datetime
 import numpy as np
-import pandas as pd
 
-from sklearn.metrics import roc_auc_score, precision_score, accuracy_score, confusion_matrix
+#from sklearn.metrics import roc_auc_score, precision_score, accuracy_score, confusion_matrix
 
 #from keras import backend as K
 from tensorflow.keras.models import Model, Sequential
@@ -25,13 +25,13 @@ from one_hot import one_hot
 
 
 class Dkt():
-	def __init__(self, num_skills, batch_size=20, hidden_units=50, optimizer='rmsprop', dropout_rate=0.5):
+	def __init__(self, num_skills, batch_size=100, hidden_units=50, optimizer='rmsprop', dropout_rate=0.5):
 		self.__num_skills = num_skills
 		self.__features = num_skills*2
 		self.__hidden_units = hidden_units
 		self.mask_value = -1.0
 
-		#ms = tf.distribute.MirroredStrategy(devices=['/gpu:0'])
+		#ms = tf.distribute.MirroredStrategy(devices=['/gpu:0', '/gpu:1'])
 		ms = tf.distribute.MirroredStrategy()
 		print('\nUsed GPU Devices:', ms.num_replicas_in_sync)
 		self.__batch_size = batch_size * ms.num_replicas_in_sync
@@ -60,7 +60,7 @@ class Dkt():
 		#self.__model.summary()
 	
 	
-	def train_and_test(self, seqs, epochs=2):
+	def train_and_test(self, seqs, epochs=200):
 		print('\nEpochs:', epochs)
 
 		### 根据每个学生作答序列生成输入输出
@@ -77,6 +77,14 @@ class Dkt():
 						每个题目对应多个知识点，设置10维数组存放题目ID，
 						因为转成tensor需要固定长度（接下来优化）
 					'''
+					# tf 2.4.0
+					#x = []
+					#for i,v in enumerate(skills):
+					#	x.append(answer*self.__num_skills+v)
+					#qtt = [] 
+					#for i,v in enumerate(skills):
+					#	qtt.append(v)
+
 					x = np.array([-1]*8)
 					for i,v in enumerate(skills):
 						x[i] = answer*self.__num_skills+v
@@ -89,24 +97,34 @@ class Dkt():
 					qtts.append(qtt)
 					ys.append(y)
 				if len(xs) > 1: # answer more than one questions
-					yield ((xs[:-1], qtts[1:], ys[1:]))
+					yield (xs[:-1], qtts[1:], ys[1:])
+					# tf 2.4.0
+					#yield tf.ragged.constant(xs[:-1]), tf.ragged.constant(qtts[1:]), ys[1:]
 
 		# multi hot question skills
 		def multi_hot(x, y, z):
 			a = tf.one_hot(x, depth=2*self.__num_skills)
-			a = tf.reduce_sum(a, 1)
 			b = tf.one_hot(y, depth=self.__num_skills)
+			a = tf.reduce_sum(a, 1)
 			b = tf.reduce_sum(b, 1)
 			c = tf.expand_dims(z, -1)
 			return (a, b, c)
 
 		dataset = tf.data.Dataset.from_generator(gen_data, output_types=(tf.int32, tf.int32, tf.float32))
+		# tf 2.4.0
+		#dataset = tf.data.Dataset.from_generator(gen_data,
+		#				output_signature=(
+		#					tf.RaggedTensorSpec(shape=(None, None), dtype=tf.int32),
+		#					tf.RaggedTensorSpec(shape=(None, None), dtype=tf.int32),
+		#					tf.TensorSpec(shape=(None,), dtype=tf.float32)))
+
 		# shape: (None, 2*188) (None, 188), (None, 1)
 		dataset = dataset.map(multi_hot)
 		# shape: (batch_size, None, 2*188) (batch_size, None, 188) (batch_size, None, 1)
-		dataset = dataset.padded_batch(self.__batch_size, padded_shapes=([None, None], [None, None], [None, None]),
-										padding_values=(self.mask_value, self.mask_value, self.mask_value,),
-										drop_remainder=True)
+		dataset = dataset.padded_batch(self.__batch_size,
+						padded_shapes=([None, None], [None, None], [None, None]),
+						padding_values=(self.mask_value, self.mask_value, self.mask_value,),
+						drop_remainder=True)
 		# 把两个输入拼在一起
 		dataset = dataset.map(lambda x, y, z: ((x, y), z))
 		
@@ -118,10 +136,14 @@ class Dkt():
 		val = temp.skip(val_size)
 		test = dataset.skip(train_size)
 
-		mc = ModelCheckpoint('../data/model/model_weights.h5',
-				monitor='auc', save_weights_only=True, save_best_only=True)
+		t = (datetime.datetime.now() + datetime.timedelta(hours=8)).strftime('_%Y_%m_%d_%H_%M_%S')
+		f = str(epochs) + 'epochs_' + str(self.__batch_size) + 'batch_size' + t + '.h5'
+		print('weights file:', f)
+		mc = ModelCheckpoint('../data/model/model_weights_' + f,
+				monitor='auc', mode='max', save_weights_only=True, save_best_only=True)
+
 		history = self.__model.fit(train, validation_data=train,
-					epochs=epochs, batch_size=self.__batch_size, callbacks=[mc], verbose=2)
+					epochs=epochs, batch_size=self.__batch_size, callbacks=[mc], verbose=1)
 
 		with open('../data/model/history.bf', mode='wb') as f:
 			pickle.dump(history.history, f)
@@ -136,6 +158,53 @@ class Dkt():
 		print('Test loss and auc:', result)
 
 	
+	def save_weights(self, path='../data/model/dkt.h5'):
+		self.__model.save_weights(path, overwrite=True)
+
+	def load_weights(self, path='../data/model/model_weights.h5'):
+		self.__model.load_weights(path)
+
+	def save_lrp_weights(self, path='../data/model/dkt_lrp.weights'):
+		h = self.__hidden_units
+
+		lstm_weights = self.__model.layers[2].get_weights()
+		
+		# lstm weights order: i, f, c, o
+		# lrp lstm weights order: i, c, f, o
+		w_xh = lstm_weights[0].T
+		w_hh = lstm_weights[1].T
+		b_xh_h = lstm_weights[2]
+
+		temp = np.copy(w_xh[h:2*h,:])
+		w_xh[h:2*h,:] = w_xh[2*h:3*h,:]
+		w_xh[2*h:3*h,:] = temp
+
+		temp = np.copy(w_hh[h:2*h,:])
+		w_hh[h:2*h,:] = w_hh[2*h:3*h,:]
+		w_hh[2*h:3*h,:] = temp
+
+		temp = np.copy(b_xh_h[h:2*h])
+		b_xh_h[h:2*h] = b_xh_h[2*h:3*h]
+		b_xh_h[2*h:3*h] = temp
+
+		dense_weights = self.__model.layers[5].get_weights()
+		w_hy = dense_weights[0].T
+		b_hy = dense_weights[1]
+
+		f = self.__model.layers[8].get_weights()
+		f_w = f[0].T
+		f_b = f[1]
+		z = self.__model.layers[9].get_weights()
+		z_w = z[0].T
+		z_b = z[1]
+
+		weights = {'w_xh': w_xh, 'w_hh': w_hh, 'b_xh_h': b_xh_h, 'w_hy': w_hy, 'b_hy': b_hy,
+				'f_w': f_w, 'f_b': f_b, 'z_w': z_w, 'z_b': z_b}
+
+		with open(path, mode='wb') as f:
+			pickle.dump(weights, f)
+
+
 #	def train_and_test(self, train_seqs, test_seqs, epochs=1):
 #		assert(epochs > 0)	  
 #
@@ -357,47 +426,6 @@ class Dkt():
 		return max_length*self.__batch_size, x, x_tt, y 
 
 
-	def save_lrp_weights(self, path='../data/model/dkt_lrp.weights'):
-		h = self.__hidden_units
-
-		lstm_weights = self.__model.layers[2].get_weights()
-		
-		# lstm weights order: i, f, c, o
-		# lrp lstm weights order: i, c, f, o
-		w_xh = lstm_weights[0].T
-		w_hh = lstm_weights[1].T
-		b_xh_h = lstm_weights[2]
-
-		temp = np.copy(w_xh[h:2*h,:])
-		w_xh[h:2*h,:] = w_xh[2*h:3*h,:]
-		w_xh[2*h:3*h,:] = temp
-
-		temp = np.copy(w_hh[h:2*h,:])
-		w_hh[h:2*h,:] = w_hh[2*h:3*h,:]
-		w_hh[2*h:3*h,:] = temp
-
-		temp = np.copy(b_xh_h[h:2*h])
-		b_xh_h[h:2*h] = b_xh_h[2*h:3*h]
-		b_xh_h[2*h:3*h] = temp
-
-		dense_weights = self.__model.layers[5].get_weights()
-		w_hy = dense_weights[0].T
-		b_hy = dense_weights[1]
-
-		f = self.__model.layers[8].get_weights()
-		f_w = f[0].T
-		f_b = f[1]
-		z = self.__model.layers[9].get_weights()
-		z_w = z[0].T
-		z_b = z[1]
-
-		weights = {'w_xh': w_xh, 'w_hh': w_hh, 'b_xh_h': b_xh_h, 'w_hy': w_hy, 'b_hy': b_hy,
-				'f_w': f_w, 'f_b': f_b, 'z_w': z_w, 'z_b': z_b}
-
-		with open(path, mode='wb') as f:
-			pickle.dump(weights, f)
-
-
 #	def save_lstm_weights(self, path='model/lstm_weights'):
 #		h = self.__hidden_units
 #
@@ -432,14 +460,6 @@ class Dkt():
 #			pickle.dump(weights, f)
 
 	
-	def save_weights(self, path='../data/model/dkt.h5'):
-		self.__model.save_weights(path, overwrite=True)
-
-
-	def load_weights(self, path='../data/model/model_weights.h5'):
-		self.__model.load_weights(path)
-
-
 	def print_answer_nums(self, train, test):
 		num_train = 0
 		num_test = 0
