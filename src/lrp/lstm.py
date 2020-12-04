@@ -108,6 +108,15 @@ class lstm:
 			self.c[t]			 = self.gates[t,idx_f]*self.c[t-1] + self.gates[t,idx_i]*self.gates[t,idx_g]
 			self.h[t]			 = self.gates[t,idx_o]*np.tanh(self.c[t])
 
+			self.y = np.dot(self.w_hy,  self.h[t]) + self.b_hy
+			self.s = 1.0 / (1.0 + np.exp(-self.y))
+			self.con = np.concatenate((self.s, self.qtts[t]))
+			self.f = np.dot(self.f_w, self.con) + self.f_b
+			self.f_a = 1.0 / (1.0 + np.exp(-self.f))
+			self.z = np.dot(self.z_w, self.f_a) + self.z_b
+			self.z_a = 1.0 / (1.0 + np.exp(-self.z))
+			print(self.z_a, 'The last result')
+
 			
 		### only need the last time y, f, z
 		#self.y = np.dot(self.w_hy,	self.h[-1])

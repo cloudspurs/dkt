@@ -1,4 +1,5 @@
 import pickle
+import numpy as np
 import pandas as pd
 
 
@@ -15,6 +16,11 @@ for i,r in df.iterrows():
 	s = [int(t) for t in tags]
 	skills.update(s)
 	question_2_skills[q] = s
+
+xxx = []
+for k,v in question_2_skills.items():
+	xxx.append(len(v))
+print(np.max(xxx), 'max skills one question')
 
 skills = sorted(skills)
 
@@ -65,9 +71,28 @@ with open(d_path, mode='rt') as f:
 			seq.append((new_skills, answer))
 			seqs[sid] = seq
 
+print(seqs[4])
+
+seq_len = [len(seqs[k]) for k in seqs.keys()]
+seq_len.sort()
+print(seq_len[:100])
+print('min 100 seqs len')
+seq_len.reverse()
+print(seq_len[:100])
+print('max 100 seqs len')
+
+max_len = np.max(seq_len)
+print(max_len, 'Seq max length:')
+max_len_stu = list(seqs.keys())[np.argmax(seq_len)]
+for k,v in students.items():
+	if v == max_len_stu:
+		max_len_stu_name = k
+print(max_len_stu_name, 'Seq max length stu:')
+exit()
+
 seqs = [seqs[k] for k in seqs.keys()]
 
-print(num, 'Question Number')
+print(num, 'Answer Number')
 print(len(seqs), 'Student Number')
 
 with open('../data/seqs.bf', mode='wb') as f:
