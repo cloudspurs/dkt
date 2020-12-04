@@ -1,0 +1,3 @@
+nohup python model.py > ../data/log.txt 2>&1 &
+docker run  --shm-size=1024m -v $PWD/dkt:/usr/work/dkt -w /usr/work/dkt --gpus all -itd tensorflow/tensorflow:latest-gpu bash
+docker exec -it container_id bash
