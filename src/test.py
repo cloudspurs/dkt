@@ -9,9 +9,6 @@ a = tf.constant([[1, 0, 3], [3, 0, 5]])
 b = tf.constant([[1, 0, 1], [1, 0, 1]])
 c = tf.reduce_sum(a, axis=-1, keepdims=True)
 d = tf.math.count_nonzero(b, axis=-1, keepdims=True)
-print(c)
-print(d)
-print(c/tf.cast(d, c.dtype))
 
 
 #print(pickle.HIGHEST_PROTOCOL)
