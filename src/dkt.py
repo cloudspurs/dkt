@@ -29,16 +29,16 @@ class Dkt():
 		self.__features = 2*num_skills
 		self.__hidden_units = hidden_units
 		self.mask_value = -1.0
+		self.__batch_size = batch_size
 
 		#ms = tf.distribute.MirroredStrategy(devices=['/gpu:0', '/gpu:1'])
 		#ms = tf.distribute.MirroredStrategy()
 		#print('\nUsed GPU Devices:', ms.num_replicas_in_sync)
-
 		#self.__batch_size = batch_size * ms.num_replicas_in_sync
-		self.__batch_size = batch_size
-		print('Batch Size:', self.__batch_size)
-
+		#print('All GPUs Batch Size:', self.__batch_size)
 		#with ms.scope():
+
+		### model define
 		x_t = Input(batch_shape=(None, None, 2*num_skills))
 		mask = Masking(self.mask_value)(x_t)
 		# MirroredStrategy not support stateful=True
@@ -52,7 +52,6 @@ class Dkt():
 
 		z = concatenate([y, mask_tt])
 		#z = multiply([y, mask_tt])
-
 		z = TimeDistributed(Dense(64, activation='sigmoid'))(z)
 		z = TimeDistributed(Dense(1, activation='sigmoid'))(z)
 
@@ -60,11 +59,7 @@ class Dkt():
 		self.__model.compile(loss='binary_crossentropy', optimizer=optimizer, metrics=[tf.keras.metrics.AUC(name='auc')])
 		#self.__model.summary()
 	
-	
-	def train_and_test(self, seqs, epochs=1):
-		print('\nEpochs:', epochs)
-
-		### 根据每个学生作答序列生成输入输出
+	def get_data(self, seqs):
 		def gen_data():
 			for seq in seqs:
 				xs = []
@@ -84,7 +79,7 @@ class Dkt():
 
 					x = np.array([-1]*8)
 					for i,v in enumerate(skills):
-						x[i] = answer*self.__num_skills+v
+						x[i] = answer * self.__num_skills + v
 					qtt = np.array([-1]*8)
 					for i,v in enumerate(skills):
 						qtt[i] = v
@@ -95,12 +90,13 @@ class Dkt():
 					ys.append(y)
 
 				if len(xs) > 1: # answer more than one questions
-					#yield (xs[:-1], qtts[1:], ys[1:])
-					yield (xs, qtts, ys)
+					yield (xs[:-1], qtts[1:], ys[1:])
+					#yield (xs, qtts, ys)
 					# tf 2.4.0
 					#yield tf.ragged.constant(xs[:-1]), tf.ragged.constant(qtts[1:]), ys[1:]
 
 		# multi hot question skills
+		@tf.autograph.experimental.do_not_convert
 		def multi_hot(x, y, z):
 			a = tf.one_hot(x, depth=2*self.__num_skills)
 			b = tf.one_hot(y, depth=self.__num_skills)
@@ -127,7 +123,13 @@ class Dkt():
 		# 把两个输入拼在一起
 		dataset = dataset.map(lambda x, y, z: ((x, y), z))
 		
-		### padded_batch之后，样本数量变len(seqs)/batch_size, 然后按batch size划分训练，验证，测试集
+		return dataset
+	
+	def train_and_test(self, seqs, epochs=1):
+
+		dataset = self.get_data(seqs)
+		
+		### padded_batch之后，样本数量变成len(seqs)/batch_size, 然后按batch size划分训练，验证，测试集
 		train_size = int(len(seqs) / self.__batch_size * 0.8) 
 		val_size = int(train_size * 0.8)
 		temp = dataset.take(train_size)
@@ -147,8 +149,8 @@ class Dkt():
 		mc = ModelCheckpoint(f, save_weights_only=True)
 
 		# train
-		#history = self.__model.fit(train, validation_data=val,
-		#			epochs=epochs, batch_size=self.__batch_size, callbacks=[mc], verbose=1)
+		history = self.__model.fit(train, validation_data=val,
+					epochs=epochs, batch_size=self.__batch_size, callbacks=[mc], verbose=1)
 
 		#with open('../data/model/history.bf', mode='wb') as f:
 		#	pickle.dump(history.history, f)
@@ -158,57 +160,16 @@ class Dkt():
 		#print('val_auc:', history.history['val_auc'][-1])
 
 		# test
-		#result = self.__model.evaluate(test)
+		result = self.__model.evaluate(test)
 
 		#with open('../data/model/test_loss_auc.bf', mode='wb') as f:
 		#	pickle.dump(result, f)
 		#print('Test loss and auc:', result)
 
 	def predict(self, seqs):
-		### 根据每个学生作答序列生成输入输出
-		def gen_data():
-			for seq in seqs:
-				xs = []
-				qtts = []
-				ys = []
-				for item in seq:
-					skills = item[0]
-					answer = item[1]
-
-					x = np.array([-1]*8)
-					for i,v in enumerate(skills):
-						x[i] = answer*self.__num_skills+v
-					qtt = np.array([-1]*8)
-					for i,v in enumerate(skills):
-						qtt[i] = v
-					y = answer
-
-					xs.append(x)
-					qtts.append(qtt)
-					ys.append(y)
-
-				if len(xs) > 1: # answer more than one questions
-					yield (xs[:-1], qtts[1:], ys[1:])
-
-		# multi hot question skills
-		def multi_hot(x, y, z):
-			a = tf.one_hot(x, depth=2*self.__num_skills)
-			b = tf.one_hot(y, depth=self.__num_skills)
-			a = tf.reduce_sum(a, 1)
-			b = tf.reduce_sum(b, 1)
-			c = tf.expand_dims(z, -1)
-			return (a, b, c)
-
-		dataset = tf.data.Dataset.from_generator(gen_data, output_types=(tf.int32, tf.int32, tf.float32))
-		dataset = dataset.map(multi_hot)
-		dataset = dataset.padded_batch(self.__batch_size,
-						padded_shapes=([None, None], [None, None], [None, None]),
-						padding_values=(self.mask_value, self.mask_value, self.mask_value),
-						drop_remainder=True)
-		dataset = dataset.map(lambda x, y, z: ((x, y), z))
-
+		dataset = self.get_data(seqs)
 		# predict
-		#self.load_weights()
+		self.load_weights()
 		preds = self.__model.predict(dataset)
 	
 	def save_weights(self, path='../data/model/dkt.h5'):
