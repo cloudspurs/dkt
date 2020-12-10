@@ -59,6 +59,53 @@ class Dkt():
 		self.__model.compile(loss='binary_crossentropy', optimizer=optimizer, metrics=[tf.keras.metrics.AUC(name='auc')])
 		#self.__model.summary()
 	
+	def train_and_test(self, seqs, epochs=1):
+
+		dataset = self.get_data(seqs)
+		
+		### padded_batch之后，样本数量变成len(seqs)/batch_size, 然后按batch size划分训练，验证，测试集
+		train_size = int(len(seqs) / self.__batch_size * 0.8) 
+		val_size = int(train_size * 0.8)
+		temp = dataset.take(train_size)
+		train = temp.take(val_size)
+		val = temp.skip(val_size)
+		test = dataset.skip(train_size)
+
+		# model weights file
+		t = (datetime.datetime.now() + datetime.timedelta(hours=8)).strftime('%Y_%m_%d_%H_%M_%S')
+		p = '../data/model/' + t + '_' + str(epochs) + 'epochs_' + str(self.__batch_size) + 'batch_size/'
+		if not os.path.exists(p):
+			os.mkdir(p)
+		f = p + '{epoch:03d}epoch_{val_auc:.2f}val_auc_{val_loss:.2f}val_loss.h5'
+		print('weights file:', f)
+
+		#mc = ModelCheckpoint('../data/model/model_weights_' + f, monitor='auc', mode='max', save_weights_only=True, save_best_only=True)
+		mc = ModelCheckpoint(f, save_weights_only=True)
+
+		# train
+		history = self.__model.fit(train, validation_data=val,
+					epochs=epochs, batch_size=self.__batch_size, callbacks=[mc], verbose=1)
+
+		#with open('../data/model/history.bf', mode='wb') as f:
+		#	pickle.dump(history.history, f)
+		#print('loss:', history.history['loss'][-1])
+		#print('auc:', history.history['auc'][-1])
+		#print('val_loss:', history.history['val_loss'][-1])
+		#print('val_auc:', history.history['val_auc'][-1])
+
+		# test
+		result = self.__model.evaluate(test)
+
+		#with open('../data/model/test_loss_auc.bf', mode='wb') as f:
+		#	pickle.dump(result, f)
+		#print('Test loss and auc:', result)
+
+	def predict(self, seqs):
+		dataset = self.get_data(seqs)
+		# predict
+		self.load_weights()
+		preds = self.__model.predict(dataset)
+	
 	def get_data(self, seqs):
 		def gen_data():
 			for seq in seqs:
@@ -124,53 +171,6 @@ class Dkt():
 		dataset = dataset.map(lambda x, y, z: ((x, y), z))
 		
 		return dataset
-	
-	def train_and_test(self, seqs, epochs=1):
-
-		dataset = self.get_data(seqs)
-		
-		### padded_batch之后，样本数量变成len(seqs)/batch_size, 然后按batch size划分训练，验证，测试集
-		train_size = int(len(seqs) / self.__batch_size * 0.8) 
-		val_size = int(train_size * 0.8)
-		temp = dataset.take(train_size)
-		train = temp.take(val_size)
-		val = temp.skip(val_size)
-		test = dataset.skip(train_size)
-
-		# model weights file
-		t = (datetime.datetime.now() + datetime.timedelta(hours=8)).strftime('%Y_%m_%d_%H_%M_%S')
-		p = '../data/model/' + t + '_' + str(epochs) + 'epochs_' + str(self.__batch_size) + 'batch_size/'
-		if not os.path.exists(p):
-			os.mkdir(p)
-		f = p + '{epoch:03d}epoch_{val_auc:.2f}val_auc_{val_loss:.2f}val_loss.h5'
-		print('weights file:', f)
-
-		#mc = ModelCheckpoint('../data/model/model_weights_' + f, monitor='auc', mode='max', save_weights_only=True, save_best_only=True)
-		mc = ModelCheckpoint(f, save_weights_only=True)
-
-		# train
-		history = self.__model.fit(train, validation_data=val,
-					epochs=epochs, batch_size=self.__batch_size, callbacks=[mc], verbose=1)
-
-		#with open('../data/model/history.bf', mode='wb') as f:
-		#	pickle.dump(history.history, f)
-		#print('loss:', history.history['loss'][-1])
-		#print('auc:', history.history['auc'][-1])
-		#print('val_loss:', history.history['val_loss'][-1])
-		#print('val_auc:', history.history['val_auc'][-1])
-
-		# test
-		result = self.__model.evaluate(test)
-
-		#with open('../data/model/test_loss_auc.bf', mode='wb') as f:
-		#	pickle.dump(result, f)
-		#print('Test loss and auc:', result)
-
-	def predict(self, seqs):
-		dataset = self.get_data(seqs)
-		# predict
-		self.load_weights()
-		preds = self.__model.predict(dataset)
 	
 	def save_weights(self, path='../data/model/dkt.h5'):
 		self.__model.save_weights(path, overwrite=True)
