@@ -102,9 +102,8 @@ class Dkt():
 
 	def predict(self, seqs):
 		dataset = self.get_data(seqs)
-		# predict
-		self.load_weights()
 		preds = self.__model.predict(dataset)
+		print(preds.shape)
 	
 	def get_data(self, seqs):
 		def gen_data():
@@ -165,8 +164,8 @@ class Dkt():
 		# shape: (batch_size, None, 2*188) (batch_size, None, 188) (batch_size, None, 1)
 		dataset = dataset.padded_batch(self.__batch_size,
 						padded_shapes=([None, None], [None, None], [None, None]),
-						padding_values=(self.mask_value, self.mask_value, self.mask_value),
-						drop_remainder=True)
+						padding_values=(self.mask_value, self.mask_value, self.mask_value))
+						#drop_remainder=True)
 		# 把两个输入拼在一起
 		dataset = dataset.map(lambda x, y, z: ((x, y), z))
 		
