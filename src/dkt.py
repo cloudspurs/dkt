@@ -15,12 +15,9 @@ for gpu in gpus:
 import numpy as np
 import time, pickle, datetime
 
-#from sklearn.metrics import roc_auc_score, precision_score, accuracy_score, confusion_matrix
-
-#from keras import backend as K
-from tensorflow.keras.models import Model, Sequential
 from tensorflow.keras.callbacks import ModelCheckpoint
 from tensorflow.keras.layers import Input, Masking, Dense, LSTM, Dropout, TimeDistributed, concatenate, multiply
+from tensorflow.keras.models import Model, Sequential
 
 
 class Dkt():
@@ -31,18 +28,10 @@ class Dkt():
 		self.mask_value = -1.0
 		self.__batch_size = batch_size
 
-		#ms = tf.distribute.MirroredStrategy(devices=['/gpu:0', '/gpu:1'])
-		#ms = tf.distribute.MirroredStrategy()
-		#print('\nUsed GPU Devices:', ms.num_replicas_in_sync)
-		#self.__batch_size = batch_size * ms.num_replicas_in_sync
-		#print('All GPUs Batch Size:', self.__batch_size)
-		#with ms.scope():
-
 		### model define
 		x_t = Input(batch_shape=(None, None, 2*num_skills))
 		mask = Masking(self.mask_value)(x_t)
-		# MirroredStrategy not support stateful=True
-		#lstm = LSTM(hidden_units, return_sequences=True, stateful=True)(mask)
+		# stateful认为所有的输入在时序上是有关的，理论上不符合dkt每个学生为独立个体的情况
 		lstm = LSTM(hidden_units, return_sequences=True)(mask)
 		dropout = Dropout(dropout_rate)(lstm)
 		y = TimeDistributed(Dense(num_skills, activation='sigmoid'))(dropout)
@@ -52,12 +41,13 @@ class Dkt():
 
 		z = concatenate([y, mask_tt])
 		#z = multiply([y, mask_tt])
+
 		z = TimeDistributed(Dense(64, activation='sigmoid'))(z)
 		z = TimeDistributed(Dense(1, activation='sigmoid'))(z)
 
 		self.__model = Model(inputs=[x_t, q_tt], outputs=z)
 		self.__model.compile(loss='binary_crossentropy', optimizer=optimizer, metrics=[tf.keras.metrics.AUC(name='auc')])
-		#self.__model.summary()
+
 	
 	def train_and_test(self, seqs, epochs=1):
 
@@ -85,20 +75,14 @@ class Dkt():
 		# train
 		history = self.__model.fit(train, validation_data=val,
 					epochs=epochs, batch_size=self.__batch_size, callbacks=[mc], verbose=1)
-
-		#with open('../data/model/history.bf', mode='wb') as f:
-		#	pickle.dump(history.history, f)
-		#print('loss:', history.history['loss'][-1])
-		#print('auc:', history.history['auc'][-1])
-		#print('val_loss:', history.history['val_loss'][-1])
-		#print('val_auc:', history.history['val_auc'][-1])
+		print('loss:', history.history['loss'][-1])
+		print('auc:', history.history['auc'][-1])
+		print('val_loss:', history.history['val_loss'][-1])
+		print('val_auc:', history.history['val_auc'][-1])
 
 		# test
 		result = self.__model.evaluate(test)
-
-		#with open('../data/model/test_loss_auc.bf', mode='wb') as f:
-		#	pickle.dump(result, f)
-		#print('Test loss and auc:', result)
+		print('Evaluate Result:', result)
 
 	def predict(self, seqs):
 		dataset = self.get_data(seqs)
@@ -115,14 +99,6 @@ class Dkt():
 					skills = item[0]
 					answer = item[1]
 
-					# tf 2.4.0
-					#x = []
-					#for i,v in enumerate(skills):
-					#	x.append(answer*self.__num_skills+v)
-					#qtt = [] 
-					#for i,v in enumerate(skills):
-					#	qtt.append(v)
-
 					x = np.array([-1]*8)
 					for i,v in enumerate(skills):
 						x[i] = answer * self.__num_skills + v
@@ -137,9 +113,6 @@ class Dkt():
 
 				if len(xs) > 1: # answer more than one questions
 					yield (xs[:-1], qtts[1:], ys[1:])
-					#yield (xs, qtts, ys)
-					# tf 2.4.0
-					#yield tf.ragged.constant(xs[:-1]), tf.ragged.constant(qtts[1:]), ys[1:]
 
 		# multi hot question skills
 		@tf.autograph.experimental.do_not_convert
@@ -152,23 +125,13 @@ class Dkt():
 			return (a, b, c)
 
 		dataset = tf.data.Dataset.from_generator(gen_data, output_types=(tf.int32, tf.int32, tf.float32))
-		# tf 2.4.0
-		#dataset = tf.data.Dataset.from_generator(gen_data,
-		#				output_signature=(
-		#					tf.RaggedTensorSpec(shape=(None, None), dtype=tf.int32),
-		#					tf.RaggedTensorSpec(shape=(None, None), dtype=tf.int32),
-		#					tf.TensorSpec(shape=(None,), dtype=tf.float32)))
-
-		# shape: (None, 2*188) (None, 188), (None, 1)
 		dataset = dataset.map(multi_hot)
-		# shape: (batch_size, None, 2*188) (batch_size, None, 188) (batch_size, None, 1)
 		dataset = dataset.padded_batch(self.__batch_size,
-						padded_shapes=([None, None], [None, None], [None, None]),
+						#padded_shapes=([None, None], [None, None], [None, None]),
+						padded_shapes=([None, 2*self.__num_skills], [None, self.__num_skills], [None, 1]),
 						padding_values=(self.mask_value, self.mask_value, self.mask_value))
-						#drop_remainder=True)
 		# 把两个输入拼在一起
 		dataset = dataset.map(lambda x, y, z: ((x, y), z))
-		
 		return dataset
 	
 	def save_weights(self, path='../data/model/dkt.h5'):
