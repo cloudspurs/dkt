@@ -1,16 +1,16 @@
 ### multi concepts dkt model
 
 import os 
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-os.environ['CUDA_VISIBLE_DEVICES'] = '7'
-print('\nVisible GPU Devices:', os.environ['CUDA_VISIBLE_DEVICES'])
+#os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+#os.environ['CUDA_VISIBLE_DEVICES'] = '7'
+#print('\nVisible GPU Devices:', os.environ['CUDA_VISIBLE_DEVICES'])
 
 import tensorflow as tf
 # 只能看到os.environ['CUDA_VISIBLE_DEVICES']设置的gpu
-gpus = tf.config.experimental.list_physical_devices(device_type='GPU')
+#gpus = tf.config.experimental.list_physical_devices(device_type='GPU')
 # limit gpu memory
-for gpu in gpus:
-    tf.config.experimental.set_memory_growth(gpu, True)
+#for gpu in gpus:
+#    tf.config.experimental.set_memory_growth(gpu, True)
 
 import numpy as np
 import time, pickle, datetime
