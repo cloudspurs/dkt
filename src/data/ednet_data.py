@@ -31,7 +31,7 @@ def split_2_200(seqs):
 	size = 200
 	for seq in seqs:
 		length = len(seq)
-		print('\n', length)
+		#print('\n', length)
 		#temp = [seqs[i:i+size] for i in range(0, length, size)]
 		temp = []
 		for i in range(0, length, size):
@@ -41,7 +41,7 @@ def split_2_200(seqs):
 				e = length
 			temp.append(seq[s:e])
 
-		print(len(temp[-1]))
+		#print(len(temp[-1]))
 		result.extend(temp)	
 		#if len(temp[-1]) >= 10:
 		#	result.extend(temp)	
@@ -52,39 +52,39 @@ def split_2_200(seqs):
 
 
 #with open('../data/ednet200-2/sub_seqs.bf', mode='rb') as f:
-with open('../data/ednet200-2/seqs.bf', mode='rb') as f:
-	seqs = pickle.load(f)
-
-length = len(seqs)
-for i in range(5):
-	start = int(length * 0.2 * i)
-	end = int(length * 0.2 * (i+1))
-
-	test = seqs[start:end] 
-	train = seqs[:start] + seqs[end:]
-
-	np.random.shuffle(train)
-	split = int(len(train) * 0.8)
-	val = train[split:]
-	train = train[:split]
-
-	with open('../data/ednet200-2/train_' + str(i) + '.bf', mode='wb') as f:
-		pickle.dump(train, f)
-	with open('../data/ednet200-2/val_' + str(i) + '.bf', mode='wb') as f:
-		pickle.dump(val, f)
-	with open('../data/ednet200-2/test_' + str(i) + '.bf', mode='wb') as f:
-		pickle.dump(test, f)
-
-	#train = split_2_200(train)
-	#val = split_2_200(val)
-	#test = split_2_200(test)
-
-	with open('../data/ednet200-2/200_train_' + str(i) + '.bf', mode='wb') as f:
-		pickle.dump(train, f)
-	with open('../data/ednet200-2/200_val_' + str(i) + '.bf', mode='wb') as f:
-		pickle.dump(val, f)
-	with open('../data/ednet200-2/200_test_' + str(i) + '.bf', mode='wb') as f:
-		pickle.dump(test, f)
+#with open('../data/ednet200-2/seqs.bf', mode='rb') as f:
+#	seqs = pickle.load(f)
+#
+#length = len(seqs)
+#for i in range(5):
+#	start = int(length * 0.2 * i)
+#	end = int(length * 0.2 * (i+1))
+#
+#	test = seqs[start:end] 
+#	train = seqs[:start] + seqs[end:]
+#
+#	np.random.shuffle(train)
+#	split = int(len(train) * 0.8)
+#	val = train[split:]
+#	train = train[:split]
+#
+#	with open('../data/ednet200-2/train_' + str(i) + '.bf', mode='wb') as f:
+#		pickle.dump(train, f)
+#	with open('../data/ednet200-2/val_' + str(i) + '.bf', mode='wb') as f:
+#		pickle.dump(val, f)
+#	with open('../data/ednet200-2/test_' + str(i) + '.bf', mode='wb') as f:
+#		pickle.dump(test, f)
+#
+#	#train = split_2_200(train)
+#	#val = split_2_200(val)
+#	#test = split_2_200(test)
+#
+#	with open('../data/ednet200-2/200_train_' + str(i) + '.bf', mode='wb') as f:
+#		pickle.dump(train, f)
+#	with open('../data/ednet200-2/200_val_' + str(i) + '.bf', mode='wb') as f:
+#		pickle.dump(val, f)
+#	with open('../data/ednet200-2/200_test_' + str(i) + '.bf', mode='wb') as f:
+#		pickle.dump(test, f)
 
 
 #d_path = '../data/data.csv'
