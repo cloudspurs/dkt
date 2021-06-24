@@ -17,18 +17,18 @@ import pickle, datetime
 from sklearn.metrics import accuracy_score
 
 from tensorflow.keras.models import Model, Sequential
-from tensorflow.keras.callbacks import ModelCheckpoint
+from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
 from tensorflow.keras.losses import binary_crossentropy
 from tensorflow.keras.layers import Input, Masking, Dense, LSTM, Dropout, TimeDistributed, concatenate, multiply
 
 
 class MultiDkt():
-	def __init__(self, num_skills, batch_size=124, hidden_units=100, optimizer='adam', dropout_rate=0.5, strategy='min'):
-		self.__num_skills = num_skills
-		self.__features = 2*num_skills
-		self.__hidden_units = hidden_units
-		self.mask_value = -1.0
-		self.__batch_size = batch_size
+	#def __init__(self, num_skills, batch_size=124, hidden_units=100, optimizer='adam', dropout_rate=0.5, strategy='min'):
+	def __init__(self, args):
+		self.__num_skills = args.concepts
+		self.__hidden_units = args.lstm_dim 
+		self.mask_value = args.mask_value
+		self.__batch_size = args.batch_size
 
 		def mean(y_pred, skills):
 			y_pred = tf.reduce_sum(y_pred * skills, axis=-1, keepdims=True)
@@ -62,13 +62,22 @@ class MultiDkt():
 			skills, y_true = tf.split(y_true, num_or_size_splits=[-1, 1], axis=-1)
 
 			#y_pred = self.get_pred(y_pred, skills)
-			y_pred = min(y_pred, skills)
+			if args.loss == 'min':
+				y_pred = min(y_pred, skills)
+			if args.loss == 'max':
+				y_pred = max(y_pred, skills)
+			if args.loss == 'mean':
+				y_pred = mean(y_pred, skills)
 
 			return y_true, y_pred
 
 		def loss(y_true, y_pred):
 			true, pred = get_target(y_true, y_pred)
 			return binary_crossentropy(true, pred)
+
+		def rmse(y_true, y_pred):
+			true, pred = get_target(y_true, y_pred)
+			return tf.math.sqrt(tf.reduce_mean(tf.math.square(pred-true), axis=-1, keepdims=True))
 
 		class Auc(tf.keras.metrics.AUC):
 			def update_state(self, y_true, y_pred, sample_weight=None):
@@ -80,47 +89,42 @@ class MultiDkt():
 				true, pred = get_target(y_true, y_pred)
 				super(BinaryAccuracy, self).update_state(y_true=true, y_pred=pred, sample_weight=sample_weight)
 			
-		x = Input(batch_shape=(None, None, 2*num_skills))
+		x = Input(batch_shape=(None, None, 2*self.__num_skills))
 		mask = Masking(self.mask_value)(x)
-		lstm = LSTM(hidden_units, return_sequences=True)(mask)
-		dropout = Dropout(dropout_rate)(lstm)
-		y = TimeDistributed(Dense(num_skills, activation='sigmoid'))(dropout)
+		lstm = LSTM(self.__hidden_units, return_sequences=True)(mask)
+		dropout = Dropout(args.dropout_rate)(lstm)
+		y = TimeDistributed(Dense(self.__num_skills, activation='sigmoid'))(dropout)
 
 		self.__model = Model(inputs=x, outputs=y)
-		self.__model.compile(loss=loss, optimizer=optimizer, metrics=[Auc(name='auc'), BinaryAccuracy(name='acc')])
+		self.__model.compile(loss=loss, optimizer=args.optimizer, metrics=[Auc(name='auc'), BinaryAccuracy(name='acc'), rmse])
 	
 
-	def train_and_test(self, train_seqs, val_seqs, test_seqs, epochs=200):
-		train = self.get_data(train_seqs)
-		val = self.get_data(val_seqs)
-		test = self.get_data(test_seqs)
+	#def train_and_test(self, train_seqs, val_seqs, test_seqs, args):
+	#	train = self.get_data(train_seqs)
+	#	val = self.get_data(val_seqs)
+	#	test = self.get_data(test_seqs)
+
+	def train_and_test(self, train, val, test, args):
+		train = self.get_data_new(train)
+		val = self.get_data_new(val)
+		test = self.get_data_new(test)
 
 		# model weights file
-		#t = (datetime.datetime.now() + datetime.timedelta(hours=8)).strftime('%Y_%m_%d_%H_%M_%S')
-		#p = '../data/model/' + t + '_' + str(epochs) + 'epochs_' + str(self.__batch_size) + 'batch_size/'
-
 		p = '../data/model/ednet_200_no_delete_morethan_10/'
 		if not os.path.exists(p):
 		        os.mkdir(p)
-		#f = p + '{epoch:03d}epoch_{val_auc:.5f}val_auc_{val_loss:.5f}val_loss.h5'
-		f = p + 'dkt.h5'
-		#print('weights file:', f)
+		f = p + args.loss + '_new_multi_dkt.h5'
 
-		#mc = ModelCheckpoint(f, save_weights_only=True)
 		mc = ModelCheckpoint(f, save_weights_only=True, save_best_only=True)
+		es = EarlyStopping(monitor='val_loss', patience=10)
 
 		# train
-		history = self.__model.fit(train, validation_data=val, epochs=epochs, callbacks=[mc])
-		#history = self.__model.fit(train, validation_data=val, epochs=epochs)
-
-		print('loss:', history.history['loss'][-1])
-		print('auc:', history.history['auc'][-1])
-		print('val_loss:', history.history['val_loss'][-1])
-		print('val_auc:', history.history['val_auc'][-1])
+		history = self.__model.fit(train, validation_data=val, epochs=args.epochs, batch_size=self.__batch_size, callbacks=[mc, es])
 
 		# evaluate
+		self.__model.load_weights(f)
 		result = self.__model.evaluate(test)
-		print('Evaluate loss, auc and acc:', result)
+		return result
 	
 
 	def evaluate(self, seqs):
@@ -135,90 +139,64 @@ class MultiDkt():
 		print(preds.shape)
 	
 
-	### last node predict accuracy
-	def last_acc(self, seqs):
-		dataset = self.get_data(seqs)
+	def get_data_new(self, path):
+		def gen_data():
+			with open(path, mode='rt') as f:
+				questions = []
+				answers = []
+				xs = []
+				qtts = []
+				ys = []
+				for index, line in enumerate(f):
+					if index % 2 == 0:
+						t = line.split(',')
+						for e in t:
+							skills = e.split('_')
+							questions.append([int(s) for s in skills])
 
-		y_true = []
-		y_pred = []
+					if index % 2 == 1:
+						answers = [int(e) for e in line.split(',')]
 
-		all_batch = int(len(seqs)/self.__batch_size)
-		batch_num = 0
+						for i, a in enumerate(answers):
+							x = np.array([-1]*7)
+							for j,q in enumerate(questions[i]):
+								x[j] = a*self.__num_skills+q
+							xs.append(x)
 
-		for element in dataset:
-			print('\rNow:', batch_num, 'All:', all_batch, 'Percentage:', batch_num/all_batch, end='')
+							qtt = np.array([-1]*7)
+							for j,q in enumerate(questions[i]):
+								qtt[j] = q
+							qtts.append(qtt)
 
-			prods = self.__model.predict_on_batch(element)
-			last_time_prods = prods[:,-1,:] # 获取每个序列最后时刻的输出
+							ys.append(a)
 
-			s = batch_num * self.__batch_size
-			e = s + self.__batch_size
-			batch_seqs = seqs[s:e]
-
-			batch_num = batch_num + 1
-
-			for i, prob in enumerate(last_time_prods):
-				seq = batch_seqs[i]
-				last = seq[-1]
-				skills = np.zeros((self.__num_skills,))
-				for s_id in last[0]:
-					skills[s_id] = 1
-				pred = np.sum(skills * prob)
-				pred = pred / len(last[0])
-				pred = 1 if pred > 0.5 else 0
-
-				y_true.append(last[1])
-				y_pred.append(pred)
-		
-		acc = accuracy_score(y_true, y_pred)
-		print('\nAccuracy', acc)
-		return acc
+						if len(xs) > 1: # answer more than one questions
+							yield (xs[:-1], qtts[1:], ys[1:])
+						questions = []
+						answers = []
+						xs = []
+						qtts = []
+						ys = []
 
 
-	def get_right_or_error_predict_seqs(self, seqs):
-		dataset = self.get_data(seqs)
-		right_seqs = []
-		error_seqs = []
+		# multi hot question skills
+		@tf.autograph.experimental.do_not_convert
+		def multi_hot(x, y, z):
+			a = tf.one_hot(x, depth=2*self.__num_skills)
+			b = tf.one_hot(y, depth=self.__num_skills)
+			### reduce_sum -> reduce_max 一个题目可能有重复的知识点 
+			a = tf.reduce_max(a, 1)
+			b = tf.reduce_max(b, 1)
+			c = tf.expand_dims(z, -1)
+			d = tf.concat([b, c], axis=-1)
+			return (a, d)
 
-		all_batch = int(len(seqs)/self.__batch_size)
-		
-		batch_num = 0
-		for element in dataset:
-			print('\rNow:', batch_num, 'All:', all_batch, 'Percentage:', batch_num/all_batch, end='')
-			preds = self.__model.predict_on_batch(element)
-			last_time_preds = preds[:,-1,:]
-			#print(preds.shape)
-
-			s = batch_num * self.__batch_size
-			e = s + self.__batch_size
-			batch_seqs = seqs[s:e]
-			batch_num = batch_num + 1
-
-			for i, prob in enumerate(last_time_preds):
-				seq = batch_seqs[i]
-				last = seq[-1]
-				skills = np.zeros((self.__num_skills,))
-				for s_id in last[0]:
-					skills[s_id] = 1
-				pred = np.sum(skills * prob)
-				pred = pred / len(last[0])
-
-				pred = 1 if pred > 0.5 else 0
-				if pred == last[1]:
-					right_seqs.append(seq)
-				else:
-					error_seqs.append(seq)
-
-		print('\n', len(right_seqs))
-		print(len(error_seqs))
-		print(len(right_seqs) + len(error_seqs))
-
-		with open('../data/lrp/right_seqs.bf', mode='wb') as f:
-			pickle.dump(right_seqs, f)
-		with open('../data/lrp/error_seqs.bf', mode='wb') as f:
-			pickle.dump(error_seqs, f)
-
-		return right_seqs, error_seqs
+		dataset = tf.data.Dataset.from_generator(gen_data, output_types=(tf.int32, tf.int32, tf.float32))
+		dataset = dataset.map(multi_hot)
+		dataset = dataset.padded_batch(self.__batch_size,
+						padded_shapes=([None, None], [None, None]),
+						padding_values=(self.mask_value, self.mask_value))
+		return dataset
 
 
 	def get_data(self, seqs):
@@ -276,36 +254,4 @@ class MultiDkt():
 	def load_weights(self, path='../data/model/dkt.h5'):
 		print(path)
 		self.__model.load_weights(path)
-
-	def save_lrp_weights(self, path='../data/model/lrp.weights'):
-		h = self.__hidden_units
-
-		lstm_weights = self.__model.layers[2].get_weights()
-		
-		# lstm weights order: i, f, c, o
-		# lrp lstm weights order: i, c, f, o
-		w_xh = lstm_weights[0].T
-		w_hh = lstm_weights[1].T
-		b_xh_h = lstm_weights[2]
-
-		temp = np.copy(w_xh[h:2*h,:])
-		w_xh[h:2*h,:] = w_xh[2*h:3*h,:]
-		w_xh[2*h:3*h,:] = temp
-
-		temp = np.copy(w_hh[h:2*h,:])
-		w_hh[h:2*h,:] = w_hh[2*h:3*h,:]
-		w_hh[2*h:3*h,:] = temp
-
-		temp = np.copy(b_xh_h[h:2*h])
-		b_xh_h[h:2*h] = b_xh_h[2*h:3*h]
-		b_xh_h[2*h:3*h] = temp
-
-		dense_weights = self.__model.layers[4].get_weights()
-		w_hy = dense_weights[0].T
-		b_hy = dense_weights[1]
-
-		weights = {'w_xh': w_xh, 'w_hh': w_hh, 'b_xh_h': b_xh_h, 'w_hy': w_hy, 'b_hy': b_hy}
-
-		with open(path, mode='wb') as f:
-			pickle.dump(weights, f)
 

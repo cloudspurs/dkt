@@ -1,0 +1,3 @@
+docker run -tid --gpus=all -v /home/mengqinggang/workplaces/dkt:/usr/work/dkt -w /usr/work/dkt --name <xxx> tensorflow/tensorflow:2.4.0rc3-gpu bash
+
+docker exec -ti -u <uid:gid> <container_name> bash

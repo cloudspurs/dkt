@@ -75,10 +75,6 @@ class Dkt():
 		# train
 		history = self.__model.fit(train, validation_data=val,
 					epochs=epochs, batch_size=self.__batch_size, callbacks=[mc], verbose=1)
-		print('loss:', history.history['loss'][-1])
-		print('auc:', history.history['auc'][-1])
-		print('val_loss:', history.history['val_loss'][-1])
-		print('val_auc:', history.history['val_auc'][-1])
 
 		# test
 		result = self.__model.evaluate(test)
